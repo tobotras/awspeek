@@ -11,6 +11,7 @@
                  [com.github.seancorfield/next.jdbc "1.3.834"]
                  [com.github.seancorfield/honeysql "2.3.928"]
                  [org.clojure/data.json "2.4.0"]
+                 [org.clj-commons/claypoole "1.2.2"]
                  [clojure-ini "0.0.2"]]
   :main ^:skip-aot awspeek.core
   :target-path "target/%s"

@@ -13,7 +13,8 @@
             [next.jdbc.prepare :as prep]
             [next.jdbc.result-set :as rs]
             [honey.sql :as sql]
-            [clojure-ini.core :as ini])
+            [clojure-ini.core :as ini]
+            [com.climate.claypoole :as cp])
   (:gen-class))
 
 (def max-object-to-dump 1024) ;1GB
@@ -23,6 +24,10 @@
 (def regexps [])
 (def db-opts (atom nil))
 (def log-statement (atom nil))
+
+;; Thread pool
+
+(def t-pool (cp/threadpool 4))
 
 (defn sql! [request]
   (jdbc/execute! @db-opts (sql/format request) {:builder-fn rs/as-unqualified-lower-maps}))
@@ -49,7 +54,8 @@
 
 (defn with-db [cfg body]
   (with-open [con (jdbc/get-connection cfg)]
-    (let [opts (jdbc/with-options con {:auto-commit false})]
+    (let [opts (jdbc/with-options con {:auto-commit false
+                                       :reWriteBatchedInserts true})]
       (jdbc/with-transaction [tx opts]
         (swap! db-opts (fn [_] tx))
         (load-regexps)
@@ -63,13 +69,16 @@
 (defn mark-match [asset resource folder object re-id]
   (when (nil? @log-statement)
     (swap! log-statement
-           (fn [_]
-             (jdbc/prepare @db-opts ["insert into matches (asset, resource, location, folder, file, regexp)
-                                      values((select id from assets where name=?),?,?,?,?,?)"]))))
+           (fn [stmt]
+             (when (nil? stmt)
+               (jdbc/prepare @db-opts ["insert into matches (asset, resource, location, folder, file, regexp)
+                                      values((select id from assets where name=?),?,?,?,?,?)"])))))
   (prep/set-parameters @log-statement [asset resource (profile-region) folder object re-id])
   (.addBatch @log-statement))
 
 (defn grep-line [asset resource folder file line]
+  ;;Stops after some 2mln lines :-O
+  ;;(cp/upfor t-pool [re regexps]
   (doseq [re regexps]
     (when (re-find (:pattern re) line)
       (mark-match asset resource folder file (:id re)))))
@@ -110,11 +119,12 @@
 
 (defn process-s3 []
   ;;DEBUG: local file
-  ;;(let [s (io/input-stream "/tmp/xtalk.mail.tobotras")]
-  ;; (grep-stream s "no-bucket" "tmpfile"))
-  (let [bucket-list (s3/list-buckets)]
-    (doseq [bucket bucket-list]
-      (process-bucket (:name bucket)))))
+  (let [s (io/input-stream "/tmp/xtalk.mail.tobotras")]
+   (grep-stream s "no-bucket" "tmpfile"))
+  ;;(let [bucket-list (s3/list-buckets)]
+  ;; (doseq [bucket bucket-list]
+  ;;    (process-bucket (:name bucket)))))
+  )
 
 ;; ----------
 (defn tools-env [var & [default]]
@@ -134,4 +144,5 @@
             :user     (tools-env "DB_USER" "ximi")
             :password (tools-env "DB_PASS" "ximipass")}
     process-s3)
+  (cp/shutdown t-pool)
   (System/exit 0))
