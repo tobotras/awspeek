@@ -10,6 +10,7 @@
             [clojure.set :as set]
             [yaml.core :as yaml]
             [next.jdbc :as jdbc]
+            [next.jdbc.prepare :as prep]
             [next.jdbc.result-set :as rs]
             [honey.sql :as sql]
             [clojure-ini.core :as ini])
@@ -20,7 +21,8 @@
 ;; DB
 
 (def regexps [])
-(def db-opts (atom {}))
+(def db-opts (atom nil))
+(def log-statement (atom nil))
 
 (defn sql! [request]
   (jdbc/execute! @db-opts (sql/format request) {:builder-fn rs/as-unqualified-lower-maps}))
@@ -56,18 +58,16 @@
 (def profile-region
   (memoize #(let [profile-name (System/getenv "AWS_PROFILE")
                   cfg (ini/read-ini (io/file (System/getenv "HOME") ".aws" "config"))]
-              (get-in cfg (str "profile " profile-name) "region"))))
+              (get-in cfg [(str "profile " profile-name) "region"]))))
 
 (defn mark-match [asset resource folder object re-id]
-  (sql! {:insert-into :matches
-         :on-conflict []
-         :do-nothing true
-         :values [{:asset {:select [:id] :from :assets :where [:= :name asset]}
-                   :resource resource
-                   :location (profile-region)
-                   :folder   folder
-                   :file     object
-                   :regexp   re-id}]}))
+  (when (nil? @log-statement)
+    (swap! log-statement
+           (fn [_]
+             (jdbc/prepare @db-opts ["insert into matches (asset, resource, location, folder, file, regexp)
+                                      values((select id from assets where name=?),?,?,?,?,?)"]))))
+  (prep/set-parameters @log-statement [asset resource (profile-region) folder object re-id])
+  (.addBatch @log-statement))
 
 (defn grep-line [asset resource folder file line]
   (doseq [re regexps]
@@ -87,7 +87,10 @@
     (doseq [[i line] (map-indexed vector lines)]
       (if (zero? (mod i 300000))
         (println i (java.util.Date.)))
-      (grep-line "AWS" "S3" bucket object-name line))))
+      (grep-line "AWS" "S3" bucket object-name line)))
+  (when-not (nil? @log-statement)
+    (.executeBatch @log-statement)
+    (swap! log-statement (fn [_] nil))))
 
 (defn grep-object [bucket object-name]
   (let [raw-stream (io/input-stream (:input-stream (s3/get-object bucket object-name)))
@@ -124,6 +127,7 @@
 
 ;; Assumption: AWS env vars (AWS_PROFILE)
 (defn -main [& args]
+  (println "region:" (profile-region))
   (with-db {:dbtype "postgresql"
             :dbname   (tools-env "DB_NAME" "ximi")
             :host     (tools-env "DB_HOST" "localhost")
