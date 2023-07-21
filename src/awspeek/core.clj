@@ -19,11 +19,11 @@
 
 ;; DB
 
-(def db-config {})
 (def regexps [])
+(def db-opts (atom {}))
 
 (defn sql! [request]
-  (jdbc/execute! db-config (sql/format request) {:builder-fn rs/as-unqualified-lower-maps}))
+  (jdbc/execute! @db-opts (sql/format request) {:builder-fn rs/as-unqualified-lower-maps}))
 
 (defn load-regexps []
   ;; SELECT REGEXPS.LABEL, REGEXPS.REGEX, DATA_CLASSES.NAME FROM REGEXPS INNER JOIN DATA_CLASSES ON REGEXPS.CLASS = DATA_CLASS.ID;
@@ -45,9 +45,13 @@
                                (assoc % :pattern (re-pattern re)))
                             rs)))))
 
-(defn db-init [cfg]
-  (alter-var-root (var db-config) (constantly cfg))
-  (load-regexps))
+(defn with-db [cfg body]
+  (with-open [con (jdbc/get-connection cfg)]
+    (let [opts (jdbc/with-options con {:auto-commit false})]
+      (jdbc/with-transaction [tx opts]
+        (swap! db-opts (fn [_] tx))
+        (load-regexps)
+        (body)))))
 
 (def profile-region
   (memoize #(let [profile-name (System/getenv "AWS_PROFILE")
@@ -55,16 +59,15 @@
               (get-in cfg (str "profile " profile-name) "region"))))
 
 (defn mark-match [asset resource folder object re-id]
-  (when false
-    (sql! {:insert-into :matches
-           :on-conflict []
-           :do-nothing true
-           :values [{:asset {:select [:id] :from :assets :where [:= :name asset]}
-                     :resource resource
-                     :location (profile-region)
-                     :folder   folder
-                     :file     object
-                     :regexp   re-id}]})))
+  (sql! {:insert-into :matches
+         :on-conflict []
+         :do-nothing true
+         :values [{:asset {:select [:id] :from :assets :where [:= :name asset]}
+                   :resource resource
+                   :location (profile-region)
+                   :folder   folder
+                   :file     object
+                   :regexp   re-id}]}))
 
 (defn grep-line [asset resource folder file line]
   (doseq [re regexps]
@@ -121,10 +124,10 @@
 
 ;; Assumption: AWS env vars (AWS_PROFILE)
 (defn -main [& args]
-  (db-init {:dbtype "postgresql"
+  (with-db {:dbtype "postgresql"
             :dbname   (tools-env "DB_NAME" "ximi")
             :host     (tools-env "DB_HOST" "localhost")
             :user     (tools-env "DB_USER" "ximi")
-            :password (tools-env "DB_PASS" "ximipass")})
-  (process-s3)
+            :password (tools-env "DB_PASS" "ximipass")}
+    process-s3)
   (System/exit 0))
