@@ -24,7 +24,7 @@
 (def regexps [])
 (def db-opts (atom nil))
 (def log-statement (atom nil))
-(def t-pool (cp/threadpool 4))
+(def t-pool (atom nil))
 
 (defn sql! [request]
   (jdbc/execute! @db-opts (sql/format request) {:builder-fn rs/as-unqualified-lower-maps}))
@@ -46,17 +46,9 @@
                                                      (if (= (first (take-last 1 re-string)) \$)
                                                        1
                                                        0)))]
-                               (assoc % :pattern (re-pattern re)))
+                               (assoc % :pattern (re-pattern (clojure.string/escape re {\\ "\\\\\\\\"}))))
                             rs)))))
 
-(defn with-db [cfg body]
-  (with-open [con (jdbc/get-connection cfg)]
-    (let [opts (jdbc/with-options con {:auto-commit false
-                                       :reWriteBatchedInserts true})]
-      (jdbc/with-transaction [tx opts]
-        (swap! db-opts (fn [_] tx))
-        (load-regexps)
-        (body)))))
 
 (def profile-region
   (memoize #(-> (System/getenv "HOME")
@@ -64,22 +56,25 @@
                 ini/read-ini
                 (get-in [(str "profile " (System/getenv "AWS_PROFILE")) "region"]))))
 
-(defn mark-match [asset resource folder object re-id]
+(defn mark-match [asset resource location folder object re-id]
   (when (nil? @log-statement)
     (swap! log-statement
            (fn [stmt]
              (when (nil? stmt)
                (jdbc/prepare @db-opts ["insert into matches (asset, resource, location, folder, file, regexp)
                                       values((select id from assets where name=?),?,?,?,?,?)"])))))
-  (prep/set-parameters @log-statement [asset resource (profile-region) folder object re-id])
+  (prep/set-parameters @log-statement [asset resource location folder object re-id])
   (.addBatch @log-statement))
 
-(defn grep-line [asset resource folder file line]
+(defn grep-line [asset resource location folder file line]
   ;;Stops after some 2mln lines :-O
+  ;;(when (nil? @t-pool)
+  ;;  (swap! t-pool (fn [_] (cp/threadpool 4))))
   ;;(cp/upfor t-pool [re regexps]
   (doseq [re regexps]
+    (println (format "grepping '%s' against '%s'" line (:pattern re)))
     (when (re-find (:pattern re) line)
-      (mark-match asset resource folder file (:id re)))))
+      (mark-match asset resource location folder file (:id re)))))
 
 (defn gzipped-stream? [s]
   (let [header (byte-array 2)]
@@ -89,22 +84,26 @@
     (and (= (first header) 31)
          (= (second header) -117))))
 
-(defn grep-stream [stream bucket object-name]
+(defn commit-batch! []
+  (when-not (nil? @log-statement)
+    (.executeBatch @log-statement)
+    (swap! log-statement (fn [_] nil)))
+  (.commit @db-opts))
+
+(defn grep-stream [stream asset resource location folder object]
   (let [lines (line-seq (io/reader stream))]
     (doseq [[i line] (map-indexed vector lines)]
       (if (zero? (mod i 300000))
         (println i (java.util.Date.)))
-      (grep-line "AWS" "S3" bucket object-name line)))
-  (when-not (nil? @log-statement)
-    (.executeBatch @log-statement)
-    (swap! log-statement (fn [_] nil))))
+      (grep-line asset resource location folder object line)))
+  (commit-batch!))
 
 (defn grep-object [bucket object-name]
   (let [raw-stream (io/input-stream (:input-stream (s3/get-object bucket object-name)))
         input-stream (if (gzipped-stream? raw-stream)
                        (java.util.zip.GZIPInputStream. raw-stream)
                        raw-stream)]
-    (grep-stream input-stream bucket object-name)))
+    (grep-stream input-stream "AWS" "S3" (profile-region) bucket object-name)))
 
 (defn process-bucket [bucket]
   (println "Bucket:" bucket)
@@ -118,15 +117,73 @@
       (println "Object key:" (:key obj) ", size" (:size obj))
       (grep-object bucket (:key obj)))))
 
+(defn hostname []
+  (-> "hostname"
+     shell/sh
+     :out
+     clojure.string/trim-newline))
+
+(defn process-local-file [file-name]
+  (let [file (io/file file-name)
+        dirName (-> file
+                    .getAbsoluteFile
+                    .getParent)]
+    (-> file-name
+        io/input-stream
+        (grep-stream "Filesystem" "Local file" (hostname) dirName (.getName file)))))
+
 (defn process-s3 []
-  ;;DEBUG: local file
-  (-> "/tmp/xtalk.mail.tobotras"
-      io/input-stream
-      (grep-stream "nobucket" "tempfile"))
-  ;; TODO: pagination?
-  ;; (doseq [bucket (s3/list-buckets)]
-  ;;    (process-bucket (:name bucket)))))
-  )
+  (if (System/getenv "AWS_PROFILE")
+    ;; TODO: pagination?
+    (doseq [bucket (s3/list-buckets)]
+      (process-bucket (:name bucket)))
+    (println "AWS_PROFILE not set, skipping S3 processing")))
+
+(defn text-column? [col]
+  ;; FIXME: datatype IDs are PostgreSQL specific, I guess!
+  (let [text-data-types ["12"]]
+    (some #(= (:type col) %) text-data-types)))
+
+(defn process-row [asset resource location folder file row]
+  (doseq [key (keys row)]
+    (grep-line asset resource location folder file (get row key))))
+
+(defn process-columns [asset resource location folder conn cols table-name]
+  (let [text-cols (filter text-column? cols)]
+    (if (empty? text-cols)
+      (println table-name "has no text columns")
+      (let [cols-list (mapv #(keyword (:name %)) text-cols)
+            rs (jdbc/execute! conn (sql/format {:select cols-list
+                                                :from (keyword table-name)
+                                                :limit 1}) {:builder-fn rs/as-unqualified-lower-maps})]
+        (doseq [row rs]
+          (process-row asset resource location folder table-name row))))))
+
+(defn process-table [asset resource location folder conn metadata table-name]
+  (println "Processing table" table-name)
+  (let [rs (.getColumns metadata nil nil table-name nil)]
+    (loop [cols []]
+      (if (.next rs)
+        (recur (conj cols {:name (.getString rs "COLUMN_NAME")
+                           :type (.getString rs "DATA_TYPE")}))
+        (process-columns asset resource location folder conn cols table-name)))))
+
+(defn process-tables [asset resource location folder conn metadata tables]
+  (if (empty? tables)
+    (println "No tables")
+    (doseq [table-name tables]
+      (process-table asset resource location folder conn metadata table-name)
+      (commit-batch!))))
+
+(defn process-psql [datasource]
+  (if-let [conn (jdbc/get-connection datasource)]
+    (let [metadata (.getMetaData conn)
+          rs (.getTables metadata nil nil nil (into-array ["TABLE"]))]
+      (loop [tables []]
+        (if (.next rs)
+          (recur (conj tables (.getString rs "TABLE_NAME")))
+          (process-tables "DB" (:dbtype datasource) (:host datasource) (:dbname datasource) conn metadata tables))))
+    (println "Can't connect to DB")))
 
 ;; ----------
 (defn tools-env [var & [default]]
@@ -137,13 +194,25 @@
     default))
 ;;-------------
 
-;; Assumption: AWS env vars (AWS_PROFILE)
 (defn -main [& args]
-  (with-db {:dbtype "postgresql"
-            :dbname   (tools-env "DB_NAME" "ximi")
-            :host     (tools-env "DB_HOST" "localhost")
-            :user     (tools-env "DB_USER" "ximi")
-            :password (tools-env "DB_PASS" "ximipass")}
-    process-s3)
-  (cp/shutdown t-pool)
-  (System/exit 0))
+  (let [datasource {:dbtype "postgresql"
+                    :dbname   (tools-env "DB_NAME" "ximi")
+                    :host     (tools-env "DB_HOST" "localhost")
+                    :user     (tools-env "DB_USER" "ximi")
+                    :password (tools-env "DB_PASS" "ximipass")}
+        con (jdbc/get-connection datasource {:auto-commit false
+                                             :reWriteBatchedInserts true})]
+    (swap! db-opts (fn [_] con))
+    (load-regexps)
+    (process-local-file
+     "data/sometext.txt" ;;"/tmp/xtalk.mail.tobotras"
+     )
+    (process-s3)
+    (process-psql {:dbtype "postgresql"
+                   :dbname "ximidata"
+                   :host "localhost"
+                   :user "ximi"
+                   :password "ximipass"})
+    (when @t-pool
+      (cp/shutdown @t-pool))
+    (System/exit 0)))
