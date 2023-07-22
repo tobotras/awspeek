@@ -72,7 +72,6 @@
   ;;  (swap! t-pool (fn [_] (cp/threadpool 4))))
   ;;(cp/upfor t-pool [re regexps]
   (doseq [re regexps]
-    (println (format "grepping '%s' against '%s'" line (:pattern re)))
     (when (re-find (:pattern re) line)
       (mark-match asset resource location folder file (:id re)))))
 
@@ -205,7 +204,8 @@
     (swap! db-opts (fn [_] con))
     (load-regexps)
     (process-local-file
-     "data/sometext.txt" ;;"/tmp/xtalk.mail.tobotras"
+     ;;"data/sometext.txt"
+     "/tmp/xtalk.mail.tobotras"
      )
     (process-s3)
     (process-psql {:dbtype "postgresql"
