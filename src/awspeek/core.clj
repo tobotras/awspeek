@@ -46,7 +46,7 @@
                                                      (if (= (first (take-last 1 re-string)) \$)
                                                        1
                                                        0)))]
-                               (assoc % :pattern (re-pattern (clojure.string/escape re {\\ "\\\\\\\\"}))))
+                               (assoc % :pattern (re-pattern (clojure.string/escape re {\\ "\\"}))))
                             rs)))))
 
 
@@ -72,6 +72,7 @@
   ;;  (swap! t-pool (fn [_] (cp/threadpool 4))))
   ;;(cp/upfor t-pool [re regexps]
   (doseq [re regexps]
+    (println (format "Matching '%s' against '%s'" line (:pattern re)))
     (when (re-find (:pattern re) line)
       (mark-match asset resource location folder file (:id re)))))
 
@@ -89,22 +90,22 @@
     (swap! log-statement (fn [_] nil)))
   (.commit @db-opts))
 
-(defn grep-stream [stream asset resource location folder object]
-  (let [lines (line-seq (io/reader stream))]
-    (doseq [[i line] (map-indexed vector lines)]
-      (if (zero? (mod i 300000))
-        (println i (java.util.Date.)))
-      (grep-line asset resource location folder object line)))
-  (commit-batch!))
+(defn grep-stream [s asset resource location folder object]
+  (let [stream (if (gzipped-stream? s)
+                       (java.util.zip.GZIPInputStream. s)
+                       s)]
+    (let [lines (line-seq (io/reader stream))]
+      (doseq [[i line] (map-indexed vector lines)]
+        (if (zero? (mod i 300000))
+          (println i (java.util.Date.)))
+        (grep-line asset resource location folder object line)))
+    (commit-batch!)))
 
-(defn grep-object [bucket object-name]
-  (let [raw-stream (io/input-stream (:input-stream (s3/get-object bucket object-name)))
-        input-stream (if (gzipped-stream? raw-stream)
-                       (java.util.zip.GZIPInputStream. raw-stream)
-                       raw-stream)]
-    (grep-stream input-stream "AWS" "S3" (profile-region) bucket object-name)))
+(defn grep-s3-object [bucket object-name]
+  (let [stream (io/input-stream (:input-stream (s3/get-object bucket object-name)))]
+    (grep-stream stream "AWS" "S3" (profile-region) bucket object-name)))
 
-(defn process-bucket [bucket]
+(defn process-s3-bucket [bucket]
   (println "Bucket:" bucket)
   ;; TODO: pagination?
   (let [objects (->> (s3/list-objects {:bucket-name bucket})                   
@@ -114,7 +115,14 @@
     ;;objects (second (first (filter #(= (first %) :object-summaries) object-list)))]
     (doseq [obj objects :when (<= (:size obj) max-object-size)]
       (println "Object key:" (:key obj) ", size" (:size obj))
-      (grep-object bucket (:key obj)))))
+      (grep-s3-object bucket (:key obj)))))
+
+(defn process-s3 []
+  (if (System/getenv "AWS_PROFILE")
+    ;; TODO: pagination?
+    (doseq [bucket (s3/list-buckets)]
+      (process-s3-bucket (:name bucket)))
+    (println "AWS_PROFILE not set, skipping S3 processing")))
 
 (defn hostname []
   (-> "hostname"
@@ -130,13 +138,6 @@
     (-> file-name
         io/input-stream
         (grep-stream "Filesystem" "Local file" (hostname) dirName (.getName file)))))
-
-(defn process-s3 []
-  (if (System/getenv "AWS_PROFILE")
-    ;; TODO: pagination?
-    (doseq [bucket (s3/list-buckets)]
-      (process-bucket (:name bucket)))
-    (println "AWS_PROFILE not set, skipping S3 processing")))
 
 (defn text-column? [col]
   ;; FIXME: datatype IDs are PostgreSQL specific, I guess!
@@ -193,7 +194,19 @@
     default))
 ;;-------------
 
+(defn usage []
+  (println "Usage:
+awspeek --s3
+   or
+awspeek --local FILENAME
+   or
+awspeek --psql HOST USER PASS DB")
+  (System/exit 1))
+
 (defn -main [& args]
+  (when (empty? args)
+    (usage))
+
   (let [datasource {:dbtype "postgresql"
                     :dbname   (tools-env "DB_NAME" "ximi")
                     :host     (tools-env "DB_HOST" "localhost")
@@ -203,16 +216,19 @@
                                              :reWriteBatchedInserts true})]
     (swap! db-opts (fn [_] con))
     (load-regexps)
-    (process-local-file
-     ;;"data/sometext.txt"
-     "/tmp/xtalk.mail.tobotras"
-     )
-    (process-s3)
-    (process-psql {:dbtype "postgresql"
-                   :dbname "ximidata"
-                   :host "localhost"
-                   :user "ximi"
-                   :password "ximipass"})
+    (case (first args)
+      "--s3"    (process-s3)
+      "--local" (if (= (count args) 2)
+                  (process-local-file (second args))
+                  (usage))
+      "--psql"  (if (= (count args) 5)
+                  (process-psql {:dbtype "postgresql"
+                                 :host (nth args 1)
+                                 :user (nth args 2)
+                                 :password (nth args 3)
+                                 :dbname (nth args 4)})
+                  (usage))
+      (usage))
     (when @t-pool
       (cp/shutdown @t-pool))
     (System/exit 0)))
