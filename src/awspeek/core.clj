@@ -17,16 +17,13 @@
             [com.climate.claypoole :as cp])
   (:gen-class))
 
-(def max-object-to-dump 1024) ;1GB
+(def max-object-size (* 1024 1024 1024)) ;1GB
 
-;; DB
+;; FIXME: globals
 
 (def regexps [])
 (def db-opts (atom nil))
 (def log-statement (atom nil))
-
-;; Thread pool
-
 (def t-pool (cp/threadpool 4))
 
 (defn sql! [request]
@@ -62,9 +59,10 @@
         (body)))))
 
 (def profile-region
-  (memoize #(let [profile-name (System/getenv "AWS_PROFILE")
-                  cfg (ini/read-ini (io/file (System/getenv "HOME") ".aws" "config"))]
-              (get-in cfg [(str "profile " profile-name) "region"]))))
+  (memoize #(-> (System/getenv "HOME")
+                (io/file ".aws" "config")
+                ini/read-ini
+                (get-in [(str "profile " (System/getenv "AWS_PROFILE")) "region"]))))
 
 (defn mark-match [asset resource folder object re-id]
   (when (nil? @log-statement)
@@ -111,18 +109,22 @@
 (defn process-bucket [bucket]
   (println "Bucket:" bucket)
   ;; TODO: pagination?
-  (let [object-list (s3/list-objects {:bucket-name bucket})
-        objects (second (first (filter #(= (first %) :object-summaries) object-list)))]
-    (doseq [obj objects :when (<= (:size obj) (* max-object-to-dump 1024 1024))]
+  (let [objects (->> (s3/list-objects {:bucket-name bucket})                   
+                     (filter #(= (first %) :object-summaries))
+                     first
+                     second)]
+    ;;objects (second (first (filter #(= (first %) :object-summaries) object-list)))]
+    (doseq [obj objects :when (<= (:size obj) max-object-size)]
       (println "Object key:" (:key obj) ", size" (:size obj))
       (grep-object bucket (:key obj)))))
 
 (defn process-s3 []
   ;;DEBUG: local file
-  (let [s (io/input-stream "/tmp/xtalk.mail.tobotras")]
-   (grep-stream s "no-bucket" "tmpfile"))
-  ;;(let [bucket-list (s3/list-buckets)]
-  ;; (doseq [bucket bucket-list]
+  (-> "/tmp/xtalk.mail.tobotras"
+      io/input-stream
+      (grep-stream "nobucket" "tempfile"))
+  ;; TODO: pagination?
+  ;; (doseq [bucket (s3/list-buckets)]
   ;;    (process-bucket (:name bucket)))))
   )
 
@@ -137,7 +139,6 @@
 
 ;; Assumption: AWS env vars (AWS_PROFILE)
 (defn -main [& args]
-  (println "region:" (profile-region))
   (with-db {:dbtype "postgresql"
             :dbname   (tools-env "DB_NAME" "ximi")
             :host     (tools-env "DB_HOST" "localhost")
