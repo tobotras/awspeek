@@ -1,14 +1,8 @@
-(ns awspeek.core
+(ns group.ximi.awspeek.core
   (:require [amazonica.aws.s3 :as s3]
-            [amazonica.aws.ec2 :as ec2]
-            [amazonica.aws.eks :as eks]
-            [kubernetes-api.core :as k8s]
             [clojure.pprint :as pp]
             [clojure.java.io :as io]
-            [clojure.data.json :as json]
             [clojure.java.shell :as shell]
-            [clojure.set :as set]
-            [yaml.core :as yaml]
             [next.jdbc :as jdbc]
             [next.jdbc.prepare :as prep]
             [next.jdbc.result-set :as rs]
@@ -17,17 +11,31 @@
             [com.climate.claypoole :as cp])
   (:gen-class))
 
+;; ----------
+(defn tools-env [var & [default]]
+  (if-let [value (System/getenv var)]
+    (if (number? default)
+      (Integer/parseUnsignedInt value)
+      value)
+    default))
+;;-------------
+
 (def max-object-size (* 1024 1024 1024)) ;1GB
+(def data-store {:dbtype "postgresql"
+                 :dbname   (tools-env "DB_NAME" "ximi")
+                 :host     (tools-env "DB_HOST" "localhost")
+                 :user     (tools-env "DB_USER" "ximi")
+                 :password (tools-env "DB_PASS" "ximipass")})
 
 ;; FIXME: globals
 
 (def regexps [])
-(def db-opts (atom nil))
-(def log-statement (atom nil))
+(def db-conn (atom nil))
+(def match-stmt (atom nil))
 (def t-pool (atom nil))
 
 (defn sql! [request]
-  (jdbc/execute! @db-opts (sql/format request) {:builder-fn rs/as-unqualified-lower-maps}))
+  (jdbc/execute! @db-conn (sql/format request) {:builder-fn rs/as-unqualified-lower-maps}))
 
 (defn load-regexps []
   ;; SELECT REGEXPS.LABEL, REGEXPS.REGEX, DATA_CLASSES.NAME FROM REGEXPS INNER JOIN DATA_CLASSES ON REGEXPS.CLASS = DATA_CLASS.ID;
@@ -49,7 +57,7 @@
                                (assoc % :pattern (re-pattern (clojure.string/escape re {\\ "\\"}))))
                             rs)))))
 
-
+;; Assumption: UNIX env
 (def profile-region
   (memoize #(-> (System/getenv "HOME")
                 (io/file ".aws" "config")
@@ -57,22 +65,21 @@
                 (get-in [(str "profile " (System/getenv "AWS_PROFILE")) "region"]))))
 
 (defn mark-match [asset resource location folder object re-id]
-  (when (nil? @log-statement)
-    (swap! log-statement
+  (when (nil? @match-stmt)
+    (swap! match-stmt
            (fn [stmt]
              (when (nil? stmt)
-               (jdbc/prepare @db-opts ["insert into matches (asset, resource, location, folder, file, regexp)
+               (jdbc/prepare @db-conn ["insert into matches (asset, resource, location, folder, file, regexp)
                                       values((select id from assets where name=?),?,?,?,?,?)"])))))
-  (prep/set-parameters @log-statement [asset resource location folder object re-id])
-  (.addBatch @log-statement))
+  (prep/set-parameters @match-stmt [asset resource location folder object re-id])
+  (.addBatch @match-stmt))
 
 (defn grep-line [asset resource location folder file line]
-  ;;Stops after some 2mln lines :-O
-  ;;(when (nil? @t-pool)
-  ;;  (swap! t-pool (fn [_] (cp/threadpool 4))))
+  (when (nil? @t-pool)
+    (swap! t-pool (fn [_] (cp/threadpool 4))))
+  ;;FIXME: stops after some 2mln lines :-O
   ;;(cp/upfor t-pool [re regexps]
   (doseq [re regexps]
-    (println (format "Matching '%s' against '%s'" line (:pattern re)))
     (when (re-find (:pattern re) line)
       (mark-match asset resource location folder file (:id re)))))
 
@@ -85,10 +92,10 @@
          (= (second header) -117))))
 
 (defn commit-batch! []
-  (when-not (nil? @log-statement)
-    (.executeBatch @log-statement)
-    (swap! log-statement (fn [_] nil)))
-  (.commit @db-opts))
+  (when-not (nil? @match-stmt)
+    (.executeBatch @match-stmt)
+    (swap! match-stmt (fn [_] nil)))
+  (.commit @db-conn))
 
 (defn grep-stream [s asset resource location folder object]
   (let [stream (if (gzipped-stream? s)
@@ -185,15 +192,6 @@
           (process-tables "DB" (:dbtype datasource) (:host datasource) (:dbname datasource) conn metadata tables))))
     (println "Can't connect to DB")))
 
-;; ----------
-(defn tools-env [var & [default]]
-  (if-let [value (System/getenv var)]
-    (if (number? default)
-      (Integer/parseUnsignedInt value)
-      value)
-    default))
-;;-------------
-
 (defn usage []
   (println "Usage:
 awspeek --s3
@@ -206,29 +204,24 @@ awspeek --psql HOST USER PASS DB")
 (defn -main [& args]
   (when (empty? args)
     (usage))
-
-  (let [datasource {:dbtype "postgresql"
-                    :dbname   (tools-env "DB_NAME" "ximi")
-                    :host     (tools-env "DB_HOST" "localhost")
-                    :user     (tools-env "DB_USER" "ximi")
-                    :password (tools-env "DB_PASS" "ximipass")}
-        con (jdbc/get-connection datasource {:auto-commit false
-                                             :reWriteBatchedInserts true})]
-    (swap! db-opts (fn [_] con))
-    (load-regexps)
-    (case (first args)
-      "--s3"    (process-s3)
-      "--local" (if (= (count args) 2)
-                  (process-local-file (second args))
-                  (usage))
-      "--psql"  (if (= (count args) 5)
-                  (process-psql {:dbtype "postgresql"
-                                 :host (nth args 1)
-                                 :user (nth args 2)
-                                 :password (nth args 3)
-                                 :dbname (nth args 4)})
-                  (usage))
-      (usage))
-    (when @t-pool
-      (cp/shutdown @t-pool))
-    (System/exit 0)))
+  (swap! db-conn (fn [_]
+                   (jdbc/get-connection data-store
+                                        {:auto-commit false
+                                         :reWriteBatchedInserts true})))
+  (load-regexps)
+  (case (first args)
+    "--s3"    (process-s3)
+    "--local" (if (= (count args) 2)
+                (process-local-file (second args))
+                (usage))
+    "--psql"  (if (= (count args) 5)
+                (process-psql {:dbtype "postgresql"
+                               :host (nth args 1)
+                               :user (nth args 2)
+                               :password (nth args 3)
+                               :dbname (nth args 4)})
+                (usage))
+    (usage))
+  (when @t-pool
+    (cp/shutdown @t-pool))
+  (System/exit 0))
