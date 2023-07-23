@@ -1,5 +1,6 @@
 (ns group.ximi.awspeek.core
   (:require [amazonica.aws.s3 :as s3]
+            [amazonica.aws.rds :as rds]
             [clojure.pprint :as pp]
             [clojure.java.io :as io]
             [clojure.java.shell :as shell]
@@ -124,18 +125,26 @@
       (println "Object key:" (:key obj) ", size" (:size obj))
       (grep-s3-object bucket (:key obj)))))
 
-(defn process-s3 []
+(defn aws-creds? []
   (if (System/getenv "AWS_PROFILE")
+    true
+    (do
+      (println "AWS_PROFILE not set, skipping S3 processing")
+      false)))
+
+(defn process-s3 []
+  (when (aws-creds?)
     ;; TODO: pagination?
     (doseq [bucket (s3/list-buckets)]
-      (process-s3-bucket (:name bucket)))
-    (println "AWS_PROFILE not set, skipping S3 processing")))
+      (process-s3-bucket (:name bucket)))))
+
+;;--------------------------------------------------------
 
 (defn hostname []
   (-> "hostname"
-     shell/sh
-     :out
-     clojure.string/trim-newline))
+      shell/sh
+      :out
+      clojure.string/trim-newline))
 
 (defn process-local-file [file-name]
   (let [file (io/file file-name)
@@ -167,7 +176,7 @@
           (process-row asset resource location folder table-name row))))))
 
 (defn process-table [asset resource location folder conn metadata table-name]
-  (println "Processing table" table-name)
+  (println "* * Processing table" table-name)
   (let [rs (.getColumns metadata nil nil table-name nil)]
     (loop [cols []]
       (if (.next rs)
@@ -177,28 +186,68 @@
 
 (defn process-tables [asset resource location folder conn metadata tables]
   (if (empty? tables)
-    (println "No tables")
+    (println "* * No tables")
     (doseq [table-name tables]
       (process-table asset resource location folder conn metadata table-name)
       (commit-batch!))))
 
-(defn process-psql [datasource]
+(defn process-psql [asset datasource]
   (if-let [conn (jdbc/get-connection datasource)]
     (let [metadata (.getMetaData conn)
           rs (.getTables metadata nil nil nil (into-array ["TABLE"]))]
       (loop [tables []]
         (if (.next rs)
           (recur (conj tables (.getString rs "TABLE_NAME")))
-          (process-tables "DB" (:dbtype datasource) (:host datasource) (:dbname datasource) conn metadata tables))))
+          (process-tables asset (:dbtype datasource) (:host datasource) (:dbname datasource) conn metadata tables))))
     (println "Can't connect to DB")))
+
+;;-----------------------------------------------------
+
+(defn discover-db [datasource]
+  (with-open [conn (jdbc/get-connection datasource)]
+    (let [rs (jdbc/execute! conn
+                            ["SELECT datname FROM pg_database WHERE datistemplate = false AND datname <> 'postgres' AND datname <> 'rdsadmin'"]
+                            {:builder-fn rs/as-unqualified-lower-maps})]
+      (map #(:datname %) rs))))
+
+(defn process-rds-postgres [instance]
+  (let [status (:dbinstance-status instance)]
+    (if (= status "available")
+      (let [endpoint (:endpoint instance)
+            datasource {:dbtype "postgresql"
+                        :user (:master-username instance)
+                        :host (:address endpoint)
+                        :port (:port endpoint)
+                        :password "qwe123qwe123"} ;;FIXME!!
+            db-list (discover-db datasource)]
+        (if (empty? db-list)
+          (println "* No databases in the instance")
+          (doseq [db-name db-list]
+            (println "* Processing database" db-name)
+            (process-psql "AWS" (assoc datasource :dbname db-name)))))
+      (println (format "* Instance status: '%s', skipping" status)))))
+
+(defn process-rds-instance [instance]
+  (println "RDS instance:" (:dbinstance-identifier instance))
+  (if (= (:engine instance) "postgres")
+    (process-rds-postgres instance)
+    (println (format "Unsupported engine: '%s'" (:engine instance)))))
+
+(defn process-rds []
+  (when (aws-creds?)
+    (doseq [instance (:dbinstances (rds/describe-db-instances))]
+      (process-rds-instance instance))))
+;;-----------------------------------------------------
 
 (defn usage []
   (println "Usage:
-awspeek --s3
+awspeek --aws-s3
+   or
+awspeek --aws-rds
    or
 awspeek --local FILENAME
    or
-awspeek --psql HOST USER PASS DB")
+awspeek --psql HOST PORT USER PASS DB")
   (System/exit 1))
 
 (defn -main [& args]
@@ -210,17 +259,20 @@ awspeek --psql HOST USER PASS DB")
                                          :reWriteBatchedInserts true})))
   (load-regexps)
   (case (first args)
-    "--s3"    (process-s3)
-    "--local" (if (= (count args) 2)
-                (process-local-file (second args))
-                (usage))
-    "--psql"  (if (= (count args) 5)
-                (process-psql {:dbtype "postgresql"
-                               :host (nth args 1)
-                               :user (nth args 2)
-                               :password (nth args 3)
-                               :dbname (nth args 4)})
-                (usage))
+    "--aws-s3"    (process-s3)
+    "--aws-rds"   (process-rds)
+    "--local"     (if (= (count args) 2)
+                    (process-local-file (second args))
+                    (usage))
+    "--psql"      (if (= (count args) 5)
+                    (let [datasource {:dbtype "postgresql"
+                                      :host (nth args 1)
+                                      :port (nth args 2)
+                                      :user (nth args 3)
+                                      :password (nth args 4)
+                                      :dbname (nth args 5)}]
+                      (process-psql "Onprem" datasource))
+                    (usage))
     (usage))
   (when @t-pool
     (cp/shutdown @t-pool))

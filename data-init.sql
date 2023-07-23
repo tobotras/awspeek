@@ -47,7 +47,7 @@ CREATE TABLE MATCHES (
 
 INSERT INTO ASSETS (NAME) VALUES
        ('AWS'),
-       ('DB'),
+       ('Onprem'),
        ('Filesystem')
 ;
 
