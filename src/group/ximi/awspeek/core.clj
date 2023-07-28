@@ -12,21 +12,23 @@
             [com.climate.claypoole :as cp])
   (:gen-class))
 
-;; ----------
-(defn tools-env [var & [default]]
-  (if-let [value (System/getenv var)]
-    (if (number? default)
-      (Integer/parseUnsignedInt value)
-      value)
-    default))
-;;-------------
-
+;; Configuration
 (def max-object-size (* 1024 1024 1024)) ;1GB
 (def data-store {:dbtype "postgresql"
                  :dbname   (tools-env "DB_NAME" "ximi")
                  :host     (tools-env "DB_HOST" "localhost")
                  :user     (tools-env "DB_USER" "ximi")
                  :password (tools-env "DB_PASS" "ximipass")})
+
+;; Tools
+(defn tools-env [var & [default]]
+  (if-let [value (System/getenv var)]
+    (if (number? default)
+      (Integer/parseUnsignedInt value)
+      value)
+    default))
+
+;;-------------
 
 ;; FIXME: globals
 
@@ -245,7 +247,7 @@ awspeek --aws-s3
    or
 awspeek --aws-rds
    or
-awspeek --local FILENAME
+awspeek --file FILENAME
    or
 awspeek --psql HOST PORT USER PASS DB")
   (System/exit 1))
@@ -261,7 +263,7 @@ awspeek --psql HOST PORT USER PASS DB")
   (case (first args)
     "--aws-s3"    (process-s3)
     "--aws-rds"   (process-rds)
-    "--local"     (if (= (count args) 2)
+    "--file"      (if (= (count args) 2)
                     (process-local-file (second args))
                     (usage))
     "--psql"      (if (= (count args) 5)
