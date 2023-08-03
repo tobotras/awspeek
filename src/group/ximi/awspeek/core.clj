@@ -11,8 +11,11 @@
             [clojure-ini.core :as ini]
             [com.climate.claypoole :as cp]
             [clj-async-profiler.core :as prof]
-            [clojure.tools.cli :as cli])
+            [clojure.tools.cli :as cli]
+            [clojure.string :as str])
   (:gen-class))
+
+(set! *warn-on-reflection* true)
 
 ;; Tools
 (defn tools-env [var & [default]]
@@ -37,8 +40,24 @@
 (def regexps [])
 (def db-conn (atom nil))
 (def match-stmt (atom nil))
+(def match-count (atom 0))
 (def t-pool (atom nil))
 (def cli-opts (atom {}))
+
+(defn precompile-regex
+  "Precompile regexps, removing '^...$' if found"
+  [re-spec]
+  (let [re-string (:regex re-spec)
+        re (.substring (java.lang.String. ^java.lang.String re-string)
+                       (if (= (first re-string) \^)
+                         1
+                        0)
+                       (- (count re-string)
+                          (if (= (first (take-last 1 re-string)) \$)
+                            1
+                            0)))]
+    (assoc re-spec :pattern (re-pattern (str/escape re {\\ "\\"})))))
+  
 
 (defn load-regexps []
   ;; SELECT REGEXPS.LABEL, REGEXPS.REGEX, DATA_CLASSES.NAME FROM REGEXPS INNER JOIN DATA_CLASSES ON REGEXPS.CLASS = DATA_CLASS.ID;
@@ -48,18 +67,7 @@
         rs (jdbc/execute! @db-conn (sql/format request) {:builder-fn rs/as-unqualified-lower-maps})]
     (alter-var-root (var regexps)
                     (fn [_]
-                      (mapv #(let [re-string (:regex %)
-                                   ;; Precompile regexps, removing "^...$" if found
-                                   re (.substring (java.lang.String. re-string)
-                                                  (if (= (first re-string) \^)
-                                                    1
-                                                    0)
-                                                  (- (count re-string)
-                                                     (if (= (first (take-last 1 re-string)) \$)
-                                                       1
-                                                       0)))]
-                               (assoc % :pattern (re-pattern (clojure.string/escape re {\\ "\\"}))))
-                            rs)))))
+                      (mapv #(precompile-regex %) rs)))))
 
 ;; Assumption: UNIX env
 (def profile-region
@@ -75,7 +83,8 @@
              (jdbc/prepare @db-conn ["insert into matches (asset, resource, location, folder, file, regexp)
                                       values((select id from assets where name=?),?,?,?,?,?)"]))))
   (prep/set-parameters @match-stmt [asset resource location folder object re-id])
-  (.addBatch @match-stmt))
+  (.addBatch ^java.sql.PreparedStatement @match-stmt)
+  (swap! match-count inc))
 
 (defn grep-line [asset resource location folder file line]
   (when (nil? @t-pool)
@@ -86,29 +95,36 @@
     (when (re-find (:pattern re) line)
       (mark-match asset resource location folder file (:id re)))))
 
-(defn gzipped-stream? [s]
+(defn gzipped-stream? [^java.io.BufferedInputStream stream]
   (let [header (byte-array 2)]
-    (.mark s 2)
-    (.read s header)
-    (.reset s)
-    (and (= (first header) 31)
-         (= (second header) -117))))
+    (doto stream
+      (.mark 2)
+      (.read header)
+      (.reset))
+    (if (and (= (first header) 31)
+             (= (second header) -117))
+      (do
+        (when (:verbosity @cli-opts)
+          (println "Gzipped stream found"))
+        true)
+      false)))
 
 (defn commit-batch! []
   (when @match-stmt
-    (.executeBatch @match-stmt)
+    (.executeBatch ^org.postgresql.jdbc.PgPreparedStatement @match-stmt)
     (swap! match-stmt (constantly nil)))
-  (.commit @db-conn))
+  (.commit ^org.postgresql.jdbc.PgConnection @db-conn))
 
 (defn grep-stream [s asset resource location folder object]
   (let [stream (if (gzipped-stream? s)
                        (java.util.zip.GZIPInputStream. s)
-                       s)]
-    (let [lines (line-seq (io/reader stream))]
-      (doseq [[i line] (map-indexed vector lines)]
-        (if (zero? (mod i 300000))
-          (println i (java.util.Date.)))
-        (grep-line asset resource location folder object line)))
+                       s)
+        lines (line-seq (io/reader stream))]
+    (doseq [[i line] (map-indexed vector lines)]
+      (when (and (zero? (mod i 300000))
+                 (:verbosity @cli-opts))
+        (println i (java.util.Date.)))
+      (grep-line asset resource location folder object line))
     (commit-batch!)))
 
 (defn grep-s3-object [bucket object-name]
@@ -127,18 +143,16 @@
       (println "Object key:" (:key obj) ", size" (:size obj))
       (grep-s3-object bucket (:key obj)))))
 
-(defn aws-creds? []
-  (if (System/getenv "AWS_PROFILE")
-    true
-    (do
-      (println "AWS_PROFILE not set, skipping AWS processing")
-      false)))
+(defn check-aws-creds []
+  (when-not (System/getenv "AWS_PROFILE")
+    (println "AWS_PROFILE not set, cannot access AWS")
+    (System/exit 2)))
 
 (defn process-s3 []
-  (when (aws-creds?)
-    ;; TODO: pagination?
-    (doseq [bucket (s3/list-buckets)]
-      (process-s3-bucket (:name bucket)))))
+  (check-aws-creds)
+  ;; TODO: pagination?
+  (doseq [bucket (s3/list-buckets)]
+    (process-s3-bucket (:name bucket))))
 
 ;;--------------------------------------------------------
 
@@ -146,7 +160,7 @@
   (-> "hostname"
       shell/sh
       :out
-      clojure.string/trim-newline))
+      str/trim-newline))
 
 (defn process-local-file [file-name]
   (println "Processing" file-name)
@@ -178,7 +192,7 @@
         (doseq [row rs]
           (process-row asset resource location folder table-name row))))))
 
-(defn process-table [asset resource location folder conn metadata table-name]
+(defn process-psql-table [asset resource location folder conn ^org.postgresql.jdbc.PgDatabaseMetaData metadata table-name]
   (println "* * Processing table" table-name)
   (let [rs (.getColumns metadata nil nil table-name nil)]
     (loop [cols []]
@@ -187,11 +201,11 @@
                            :type (.getString rs "DATA_TYPE")}))
         (process-columns asset resource location folder conn cols table-name)))))
 
-(defn process-tables [asset resource location folder conn metadata tables]
+(defn process-psql-tables [asset resource location folder conn metadata tables]
   (if (empty? tables)
     (println "* * No tables")
     (doseq [table-name tables]
-      (process-table asset resource location folder conn metadata table-name)
+      (process-psql-table asset resource location folder conn metadata table-name)
       (commit-batch!))))
 
 (defn process-psql [asset datasource]
@@ -201,7 +215,7 @@
       (loop [tables []]
         (if (.next rs)
           (recur (conj tables (.getString rs "TABLE_NAME")))
-          (process-tables asset (:dbtype datasource) (:host datasource) (:dbname datasource) conn metadata tables))))
+          (process-psql-tables asset (:dbtype datasource) (:host datasource) (:dbname datasource) conn metadata tables))))
     (println "Can't connect to DB")))
 
 ;;-----------------------------------------------------
@@ -238,9 +252,9 @@
     (println (format "Unsupported engine: '%s'" (:engine instance)))))
 
 (defn process-rds []
-  (when (aws-creds?)
-    (doseq [instance (:dbinstances (rds/describe-db-instances))]
-      (process-rds-instance instance))))
+  (check-aws-creds)
+  (doseq [instance (:dbinstances (rds/describe-db-instances))]
+    (process-rds-instance instance)))
 ;;-----------------------------------------------------
 
 (defn usage [parsed]
@@ -291,4 +305,6 @@
                                 (usage parsed)
                                 (process-psql "Omprem" datasource)))
         :else (usage parsed))))
+  (when (pos? @match-count)
+    (println "Matches registered:" @match-count))
   (System/exit 0))                      ; or else
