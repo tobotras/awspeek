@@ -9,16 +9,10 @@
             [next.jdbc.result-set :as rs]
             [honey.sql :as sql]
             [clojure-ini.core :as ini]
-            [com.climate.claypoole :as cp])
+            [com.climate.claypoole :as cp]
+            [clj-async-profiler.core :as prof]
+            [clojure.tools.cli :as cli])
   (:gen-class))
-
-;; Configuration
-(def max-object-size (* 1024 1024 1024)) ;1GB
-(def data-store {:dbtype "postgresql"
-                 :dbname   (tools-env "DB_NAME" "ximi")
-                 :host     (tools-env "DB_HOST" "localhost")
-                 :user     (tools-env "DB_USER" "ximi")
-                 :password (tools-env "DB_PASS" "ximipass")})
 
 ;; Tools
 (defn tools-env [var & [default]]
@@ -28,6 +22,14 @@
       value)
     default))
 
+;; Configuration
+(def max-object-size (* 1024 1024 1024)) ;1GB
+(def data-store {:dbtype "postgresql"
+                 :dbname   (tools-env "DB_NAME" "ximi")
+                 :host     (tools-env "DB_HOST" "localhost")
+                 :user     (tools-env "DB_USER" "ximi")
+                 :password (tools-env "DB_PASS" "ximipass")})
+
 ;;-------------
 
 ;; FIXME: globals
@@ -36,15 +38,14 @@
 (def db-conn (atom nil))
 (def match-stmt (atom nil))
 (def t-pool (atom nil))
-
-(defn sql! [request]
-  (jdbc/execute! @db-conn (sql/format request) {:builder-fn rs/as-unqualified-lower-maps}))
+(def cli-opts (atom {}))
 
 (defn load-regexps []
   ;; SELECT REGEXPS.LABEL, REGEXPS.REGEX, DATA_CLASSES.NAME FROM REGEXPS INNER JOIN DATA_CLASSES ON REGEXPS.CLASS = DATA_CLASS.ID;
-  (let [rs (sql! {:select [:regexps.id :regexps.label :regexps.regex [:data_classes.name :class]]
-                  :from [:regexps]
-                  :right-join [:data_classes [:= :regexps.class :data_classes.id]]})]
+  (let [request {:select [:regexps.id :regexps.label :regexps.regex [:data_classes.name :class]]
+                 :from [:regexps]
+                 :right-join [:data_classes [:= :regexps.class :data_classes.id]]}
+        rs (jdbc/execute! @db-conn (sql/format request) {:builder-fn rs/as-unqualified-lower-maps})]
     (alter-var-root (var regexps)
                     (fn [_]
                       (mapv #(let [re-string (:regex %)
@@ -70,16 +71,15 @@
 (defn mark-match [asset resource location folder object re-id]
   (when (nil? @match-stmt)
     (swap! match-stmt
-           (fn [stmt]
-             (when (nil? stmt)
-               (jdbc/prepare @db-conn ["insert into matches (asset, resource, location, folder, file, regexp)
-                                      values((select id from assets where name=?),?,?,?,?,?)"])))))
+           (fn [_]
+             (jdbc/prepare @db-conn ["insert into matches (asset, resource, location, folder, file, regexp)
+                                      values((select id from assets where name=?),?,?,?,?,?)"]))))
   (prep/set-parameters @match-stmt [asset resource location folder object re-id])
   (.addBatch @match-stmt))
 
 (defn grep-line [asset resource location folder file line]
   (when (nil? @t-pool)
-    (swap! t-pool (fn [_] (cp/threadpool 4))))
+    (swap! t-pool (constantly (cp/threadpool 4))))
   ;;FIXME: stops after some 2mln lines :-O
   ;;(cp/upfor t-pool [re regexps]
   (doseq [re regexps]
@@ -95,9 +95,9 @@
          (= (second header) -117))))
 
 (defn commit-batch! []
-  (when-not (nil? @match-stmt)
+  (when @match-stmt
     (.executeBatch @match-stmt)
-    (swap! match-stmt (fn [_] nil)))
+    (swap! match-stmt (constantly nil)))
   (.commit @db-conn))
 
 (defn grep-stream [s asset resource location folder object]
@@ -131,7 +131,7 @@
   (if (System/getenv "AWS_PROFILE")
     true
     (do
-      (println "AWS_PROFILE not set, skipping S3 processing")
+      (println "AWS_PROFILE not set, skipping AWS processing")
       false)))
 
 (defn process-s3 []
@@ -149,6 +149,7 @@
       clojure.string/trim-newline))
 
 (defn process-local-file [file-name]
+  (println "Processing" file-name)
   (let [file (io/file file-name)
         dirName (-> file
                     .getAbsoluteFile
@@ -220,7 +221,8 @@
                         :user (:master-username instance)
                         :host (:address endpoint)
                         :port (:port endpoint)
-                        :password "qwe123qwe123"} ;;FIXME!!
+                        :password "qwe123QWE123"} ;;FIXME!!
+            _ (println "Connecting to" endpoint)
             db-list (discover-db datasource)]
         (if (empty? db-list)
           (println "* No databases in the instance")
@@ -241,41 +243,52 @@
       (process-rds-instance instance))))
 ;;-----------------------------------------------------
 
-(defn usage []
-  (println "Usage:
-awspeek --aws-s3
-   or
-awspeek --aws-rds
-   or
-awspeek --file FILENAME
-   or
-awspeek --psql HOST PORT USER PASS DB")
+(defn usage [parsed]
+  (println "Usage:")
+  (println (:summary parsed))
   (System/exit 1))
 
 (defn -main [& args]
-  (when (empty? args)
-    (usage))
-  (swap! db-conn (fn [_]
-                   (jdbc/get-connection data-store
-                                        {:auto-commit false
-                                         :reWriteBatchedInserts true})))
-  (load-regexps)
-  (case (first args)
-    "--aws-s3"    (process-s3)
-    "--aws-rds"   (process-rds)
-    "--file"      (if (= (count args) 2)
-                    (process-local-file (second args))
-                    (usage))
-    "--psql"      (if (= (count args) 5)
-                    (let [datasource {:dbtype "postgresql"
-                                      :host (nth args 1)
-                                      :port (nth args 2)
-                                      :user (nth args 3)
-                                      :password (nth args 4)
-                                      :dbname (nth args 5)}]
-                      (process-psql "Onprem" datasource))
-                    (usage))
-    (usage))
-  (when @t-pool
-    (cp/shutdown @t-pool))
-  (System/exit 0))
+  (let [parsed (cli/parse-opts args
+                               [["-v" "--verbose" "Verbosity"
+                                 :id :verbosity
+                                 :default 0
+                                 :update-fn inc]
+                                ["-s" "--aws-s3" "Process AWS S3 storage"]
+                                ["-r" "--aws-rds" "Process AWS RDS tables"]
+                                ["-f" "--file FILE" "Proces local text file"
+                                 :validate [#(.exists (io/file %)) "No such file"]]
+                                ["-d" "--dbname DATABASE" "PostgreSQL database name"]
+                                ["-h" "--host HOSTNAME" "PostgreSQL server host"]
+                                ["-p" "--port PORT" "PostgreSQL server port"
+                                 :default 5432
+                                 :parse-fn #(Integer/parseInt %)
+                                 :validate [#(< 0 % 65536) "Invalid port number"]]
+                                ["-u" "--user USERNAME" "PostgreSQL server username"]
+                                ["-w" "--password PASS" "PostgreSQL server password"]]
+                               )
+        err (:errors parsed)]
+    (swap! cli-opts (constantly (:options parsed)))
+    (when err
+      (println (first err))
+      (System/exit 0))
+    (with-open [c (jdbc/get-connection data-store
+                                       {:auto-commit false
+                                        :reWriteBatchedInserts true})]
+      (swap! db-conn (constantly c))
+      (load-regexps)
+      (cond
+        (:aws-s3 @cli-opts) (process-s3)
+        (:aws-rds @cli-opts) (process-rds)
+        (:file @cli-opts) (process-local-file (:file @cli-opts))
+        (:dbname @cli-opts) (let [datasource {:dbtype "postgresql"
+                                              :host (:host @cli-opts)
+                                              :port (:port @cli-opts)
+                                              :user (:user @cli-opts)
+                                              :password (:password @cli-opts)
+                                              :dbname (:dbname @cli-opts)}]
+                              (if (some nil? (vals datasource))
+                                (usage parsed)
+                                (process-psql "Omprem" datasource)))
+        :else (usage parsed))))
+  (System/exit 0))                      ; or else

@@ -9,9 +9,11 @@
                  [com.github.seancorfield/next.jdbc "1.3.834"]
                  [com.github.seancorfield/honeysql "2.3.928"]
                  [org.clj-commons/claypoole "1.2.2"]
+                 [com.clojure-goes-fast/clj-async-profiler "1.0.4"]
+                 [org.clojure/tools.cli "1.0.219"]
                  [clojure-ini "0.0.2"]]
   :main ^:skip-aot group.ximi.awspeek.core
   :target-path "target/%s"
-  :jvm-opts []
+  :jvm-opts ["-Djdk.attach.allowAttachSelf"]
   :profiles {:uberjar {:aot :all
                        :jvm-opts ["-Dclojure.compiler.direct-linking=true"]}})
