@@ -1,7 +1,7 @@
 (ns group.ximi.awspeek.core
   (:require [amazonica.aws.s3 :as s3]
             [amazonica.aws.rds :as rds]
-            [clojure.pprint :as pp]
+            ;;[clojure.pprint :as pp]
             [clojure.java.io :as io]
             [clojure.java.shell :as shell]
             [next.jdbc :as jdbc]
@@ -10,12 +10,10 @@
             [honey.sql :as sql]
             [clojure-ini.core :as ini]
             [com.climate.claypoole :as cp]
-            [clj-async-profiler.core :as prof]
+            ;;[clj-async-profiler.core :as prof]
             [clojure.tools.cli :as cli]
             [clojure.string :as str])
   (:gen-class))
-
-(set! *warn-on-reflection* true)
 
 ;; Tools
 (defn tools-env [var & [default]]

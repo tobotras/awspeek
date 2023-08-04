@@ -16,5 +16,7 @@
   :target-path "target/%s"
   :jvm-opts ["-Djdk.attach.allowAttachSelf"]
   :profiles {:uberjar {:aot :all
-                       :jvm-opts ["-Dclojure.compiler.direct-linking=true"]}}
+                       :jvm-opts ["-Dclojure.compiler.direct-linking=true"]}
+             :user {:dependencies [[clj-kondo "RELEASE"]]
+                    :aliases {"clj-kondo" ["run" "-m" "clj-kondo.main"]}}}
   :plugins [[jonase/eastwood "1.4.0"]])
