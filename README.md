@@ -26,8 +26,6 @@ For AWS auto-discovers all S3 buckets and files, all RDS databases and tables.
 
     $ java -jar target/uberjar/awspeek-0.1.0-SNAPSHOT-standalone.jar [args]
 
-Log is appended to `MATCHES` table.
-
 ## Options
 
       -v, --verbose          0     Verbosity
@@ -44,6 +42,29 @@ Log is appended to `MATCHES` table.
 
 For AWS access `AWS_PROFILE` variable should be set and refer to existing profile
 in `~/.aws/config` and `~/.aws/credentials`. 
+
+## Output
+
+Regex matches are recorded into `MATCHES` table:
+```
+ximi=> select distinct (select name from assets where id=asset), resource, location, folder, file, (select label from regexps where id=regexp) from matches;
+    name    |  resource  |                      location                       |                 folder                 |      file      |     label      
+------------+------------+-----------------------------------------------------+----------------------------------------+----------------+----------------
+ AWS        | S3         | us-east-1                                           | tobotras.the-bucket                    | another.txt.gz | Person name
+ AWS        | S3         | us-east-1                                           | tobotras.the-bucket                    | sometext.txt   | Person name
+ AWS        | S3         | us-east-1                                           | tobotras.the-bucket                    | sometext.txt   | Phone number
+ AWS        | postgresql | boris-psql.clvej8ii61c4.us-east-1.rds.amazonaws.com | tbase                                  | assets         | Person name
+ AWS        | postgresql | boris-psql.clvej8ii61c4.us-east-1.rds.amazonaws.com | tbase                                  | data_classes   | Person name
+ AWS        | postgresql | boris-psql.clvej8ii61c4.us-east-1.rds.amazonaws.com | tbase                                  | regexps        | Person address
+ AWS        | postgresql | boris-psql.clvej8ii61c4.us-east-1.rds.amazonaws.com | tbase                                  | regexps        | Person name
+ Filesystem | Local file | MacBook-Pro-2.local                                 | /Users/boristobotras/Ximi/awspeek/data | another.txt.gz | Person name
+ Filesystem | Local file | MacBook-Pro-2.local                                 | /Users/boristobotras/Ximi/awspeek/data | sometext.txt   | Person name
+ Filesystem | Local file | MacBook-Pro-2.local                                 | /Users/boristobotras/Ximi/awspeek/data | sometext.txt   | Phone number
+ Filesystem | Local file | MacBook-Pro-2.local                                 | /etc                                   | passwd         | Person name
+ Onprem     | postgresql | localhost                                           | ximidata                               | persons        | Person name
+ Onprem     | postgresql | localhost                                           | ximidata                               | persons        | Phone number
+(13 rows)
+```
 
 ### Bugs
 
