@@ -1,36 +1,55 @@
 # awspeek
 
-FIXME: description
+Run regex search against data. Data storage supported:
+  1. local file (plain text or gzipped),
+  2. AWS S3 (plain text or gzipped),
+  3. AWS RDS (PostgreSQL),
+  4. local PostgreSQL.
+
+For AWS auto-discovers all S3 buckets and files, all RDS databases and tables.
 
 ## Installation
 
-Download from http://example.com/FIXME.
+1. Install JDK, clojure, leiningen.
+2. Run "lein uberjar"
+3. Set up PostgreSQL server:
+  1. Create DB `awspeek`
+  2. Initialize DB:
+     1. `psql -d postgres < db-init.sql`
+     2. `psql -d ximi -U ximi < data-init.sql`
+
+`data-init.sql` contains sample regex set, edit freely.
 
 ## Usage
 
-FIXME: explanation
+    $ java -jar target/uberjar/awspeek-0.1.0-SNAPSHOT-standalone.jar [args]
 
-    $ java -jar awspeek-0.1.0-standalone.jar [args]
+Log is appended to `MATCHES` table.
 
 ## Options
 
-FIXME: listing of options this app accepts.
+      -v, --verbose          0     Verbosity
+      -s, --aws-s3                 Process AWS S3 storage
+      -r, --aws-rds                Process AWS RDS tables
+      -f, --file FILE              Proces local text file
+      -d, --dbname DATABASE        PostgreSQL database name
+      -h, --host HOSTNAME          PostgreSQL server host
+      -p, --port PORT        5432  PostgreSQL server port
+      -u, --user USERNAME          PostgreSQL server username
+      -w, --password PASS          PostgreSQL server password
 
-## Examples
+## Environment
 
-...
+For AWS access `AWS_PROFILE` variable should be set and refer to existing profile
+in `~/.aws/config` and `~/.aws/credentials`. 
 
 ### Bugs
 
-...
-
-### Any Other Sections
-### That You Think
-### Might be Useful
+It's only proof of concept, so it may format your disk and kill you dog too.
 
 ## License
 
-Copyright © 2023 FIXME
+Copyright © 2023 Boris Tobotras
 
 This program and the accompanying materials are made available under the
 terms of the Eclipse Public License 2.0 which is available at
