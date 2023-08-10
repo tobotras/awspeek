@@ -10,12 +10,21 @@ For AWS auto-discovers all S3 buckets and files, all RDS databases and tables.
 
 ## Installation
 
-1. Install JDK, clojure, leiningen
+1. Install JDK, clojure, leiningen.
 2. Run "lein uberjar"
+3. Set up PostgreSQL server:
+  1. Create DB `awspeek`
+  2. Initialize DB:
+     1. `psql -d postgres < db-init.sql`
+     2. `psql -d ximi -U ximi < data-init.sql`
+
+`data-init.sql` contains sample regex set, edit freely.
 
 ## Usage
 
     $ java -jar target/uberjar/awspeek-0.1.0-SNAPSHOT-standalone.jar [args]
+
+    Log is available in `MATCHES` table.
 
 ## Options
 
