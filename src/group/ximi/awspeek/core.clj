@@ -33,8 +33,7 @@
 
 ;;-------------
 
-;; FIXME: globals
-
+;; Wait, what are those, GLOBALS?!
 (def regexps [])
 (def db-conn (atom nil))
 (def match-stmt (atom nil))

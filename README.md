@@ -68,7 +68,8 @@ ximi=> select distinct (select name from assets where id=asset), resource, locat
 
 ### Bugs
 
-It's only proof of concept, so it may format your disk and kill you dog too.
+0. It's only proof of concept, so it may format your disk and kill you dog too.
+1. It logs to RDS-managed PostgreSQL using hardcoded master password 'qwe123QWE123'.
 
 ## License
 
