@@ -24,7 +24,7 @@ For AWS auto-discovers all S3 buckets and files, all RDS databases and tables.
 
     $ java -jar target/uberjar/awspeek-0.1.0-SNAPSHOT-standalone.jar [args]
 
-    Log is available in `MATCHES` table.
+Log is appended to `MATCHES` table.
 
 ## Options
 
