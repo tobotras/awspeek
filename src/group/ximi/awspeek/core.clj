@@ -63,9 +63,7 @@
                  :from [:regexps]
                  :right-join [:data_classes [:= :regexps.class :data_classes.id]]}
         rs (jdbc/execute! @db-conn (sql/format request) {:builder-fn rs/as-unqualified-lower-maps})]
-    (alter-var-root (var regexps)
-                    (fn [_]
-                      (mapv #(precompile-regex %) rs)))))
+    (alter-var-root (var regexps) (fn [_] (mapv precompile-regex rs)))))
 
 ;; Assumption: UNIX env
 (def profile-region
