@@ -13,12 +13,14 @@ For AWS auto-discovers all S3 buckets and files, all RDS databases and tables.
 1. Install JDK, clojure, leiningen.
 2. Run "lein uberjar"
 3. Set up PostgreSQL server:
-  1. Create DB `awspeek`
-  2. Initialize DB:
-     1. `psql -d postgres < db-init.sql`
-     2. `psql -d ximi -U ximi < data-init.sql`
+    1. Create DB `awspeek`
+    2. Initialize DB:
+        1. `psql -d postgres < db-init.sql`
+        2. `psql -d ximi -U ximi < data-init.sql`
 
 `data-init.sql` contains sample regex set, edit freely.
+
+`testdb-init.sql` contains example test data, load to target PostgreSQL (local or AWS RDS-managed).
 
 ## Usage
 
