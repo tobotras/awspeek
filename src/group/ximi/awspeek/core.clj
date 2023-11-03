@@ -146,7 +146,9 @@
 (defn process-s3 []
   (check-aws-creds)
   ;; TODO: pagination?
-  (doseq [bucket (s3/list-buckets)]
+  (doseq [bucket (s3/list-buckets
+                  ;;{:endpoint "https://storage.api.il.nebius.cloud/"}
+                  )]
     (process-s3-bucket (:name bucket))))
 
 ;;--------------------------------------------------------

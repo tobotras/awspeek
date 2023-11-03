@@ -11,6 +11,9 @@
                  [org.clj-commons/claypoole "1.2.2"]
                  [com.clojure-goes-fast/clj-async-profiler "1.0.4"]
                  [org.clojure/tools.cli "1.0.219"]
+                 [org.apache.logging.log4j/log4j-api "2.11.0"]
+                 [org.apache.logging.log4j/log4j-core "2.11.0"]
+                 [org.apache.logging.log4j/log4j-1.2-api "2.11.0"]
                  [clojure-ini "0.0.2"]]
   :main ^:skip-aot group.ximi.awspeek.core
   :target-path "target/%s"
