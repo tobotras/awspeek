@@ -37,6 +37,7 @@ For AWS auto-discovers all S3 buckets and files, all RDS databases and tables.
       -p, --port PORT        5432  PostgreSQL server port
       -u, --user USERNAME          PostgreSQL server username
       -w, --password PASS          PostgreSQL server password
+      -m, --maxmatches N           Process up to N matches per source
 
 ## Environment
 

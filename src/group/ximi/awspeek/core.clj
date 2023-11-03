@@ -1,7 +1,7 @@
 (ns group.ximi.awspeek.core
   (:require [amazonica.aws.s3 :as s3]
             [amazonica.aws.rds :as rds]
-            ;;[clojure.pprint :as pp]
+            [clojure.pprint :as pp]
             [clojure.java.io :as io]
             [clojure.java.shell :as shell]
             [next.jdbc :as jdbc]
@@ -37,7 +37,7 @@
 (def regexps [])
 (def db-conn (atom nil))
 (def match-stmt (atom nil))
-(def match-count (atom 0))
+(def match-count (atom {}))
 (def t-pool (atom nil))
 (def cli-opts (atom {}))
 
@@ -79,7 +79,9 @@
                                       values((select id from assets where name=?),?,?,?,?,?)"]))))
   (prep/set-parameters @match-stmt [asset resource location folder object re-id])
   (.addBatch ^java.sql.PreparedStatement @match-stmt)
-  (swap! match-count inc))
+  (swap! match-count #(update % (clojure.string/join "/" [asset resource location folder object])
+                              (fn [cnt]
+                                (if cnt (inc cnt) 1)))))
 
 (defn grep-line [asset resource location folder file line]
   (when (nil? @t-pool)
@@ -276,7 +278,11 @@
                                  :parse-fn #(Integer/parseInt %)
                                  :validate [#(< 0 % 65536) "Invalid port number"]]
                                 ["-u" "--user USERNAME" "PostgreSQL server username"]
-                                ["-w" "--password PASS" "PostgreSQL server password"]]
+                                ["-w" "--password PASS" "PostgreSQL server password"]
+                                ["-m" "--maxmatches N" "Process up to N matches per source"
+                                 :parse-fn #(Integer/parseInt %)
+                                 :validate [#(<= % 0) "Invalid number of matches"]
+                                 ]]
                                )
         err (:errors parsed)]
     (swap! cli-opts (constantly (:options parsed)))
@@ -302,6 +308,7 @@
                                 (usage parsed)
                                 (process-psql "Omprem" datasource)))
         :else (usage parsed))))
-  (when (pos? @match-count)
-    (println "Matches registered:" @match-count))
+  (let [total-matches (reduce + (vals @match-count))]
+    (when (pos? total-matches)
+      (println "Matches registered:" total-matches)))
   (System/exit 0))                      ; or else
