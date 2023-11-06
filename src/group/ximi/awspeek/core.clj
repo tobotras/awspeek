@@ -71,6 +71,10 @@
                 ini/read-ini
                 (get-in [(str "profile " (System/getenv "AWS_PROFILE")) "region"]))))
 
+(defn obj-path [asset resource location folder object]
+  (clojure.string/join "/" [asset resource location folder object]))
+
+;; Returns nil if too many matches already, true to continue
 (defn mark-match [asset resource location folder object re-id]
   (when (nil? @match-stmt)
     (swap! match-stmt
@@ -79,18 +83,31 @@
                                       values((select id from assets where name=?),?,?,?,?,?)"]))))
   (prep/set-parameters @match-stmt [asset resource location folder object re-id])
   (.addBatch ^java.sql.PreparedStatement @match-stmt)
-  (swap! match-count #(update % (clojure.string/join "/" [asset resource location folder object])
-                              (fn [cnt]
-                                (if cnt (inc cnt) 1)))))
+  (let [k (obj-path asset resource location folder object)
+        count (inc (get @match-count k 0))]
+    (swap! match-count #(update % k (constantly count)))
+    (if-let [maxmatches (:maxmatches @cli-opts)]
+      (if (>= count maxmatches)
+        (do
+          (when (:verbosity @cli-opts)
+            (println "Too many matches for" k))
+          nil)
+        true)
+      true)))
 
+;; Returns nil if too many matches already, true to continue
 (defn grep-line [asset resource location folder file line]
   (when (nil? @t-pool)
     (swap! t-pool (constantly (cp/threadpool 4))))
   ;;FIXME: stops after some 2mln lines :-O
   ;;(cp/upfor t-pool [re regexps]
-  (doseq [re regexps]
-    (when (re-find (:pattern re) line)
-      (mark-match asset resource location folder file (:id re)))))
+  (loop [regexps-todo regexps]
+    (if-let [re (first regexps-todo)]
+      (if (re-find (:pattern re) line)
+        (when (mark-match asset resource location folder file (:id re))
+          (recur (rest regexps-todo)))
+        (recur (rest regexps-todo)))
+      true)))
 
 (defn gzipped-stream? [^java.io.BufferedInputStream stream]
   (let [header (byte-array 2)]
@@ -113,15 +130,20 @@
   (.commit ^org.postgresql.jdbc.PgConnection @db-conn))
 
 (defn grep-stream [s asset resource location folder object]
+  (when (:verbosity @cli-opts)
+    (println "Processing" (obj-path asset resource location folder object)))
   (let [stream (if (gzipped-stream? s)
-                       (java.util.zip.GZIPInputStream. s)
-                       s)
+                 (java.util.zip.GZIPInputStream. s)
+                 s)
         lines (line-seq (io/reader stream))]
-    (doseq [[i line] (map-indexed vector lines)]
-      (when (and (zero? (mod i 300000))
-                 (:verbosity @cli-opts))
-        (println i (java.util.Date.)))
-      (grep-line asset resource location folder object line))
+    (loop [i-lines (map-indexed vector lines)]
+      (let [[i line] (first i-lines)]
+        (when-not (nil? line)
+          (when (and (zero? (mod i 300000))
+                     (:verbosity @cli-opts))
+            (println i (java.util.Date.)))
+          (when (grep-line asset resource location folder object line)
+            (recur (rest i-lines))))))
     (commit-batch!)))
 
 (defn grep-s3-object [bucket object-name]
@@ -261,6 +283,30 @@
   (println (:summary parsed))
   (System/exit 1))
 
+(defn do-work [parsed]
+  (with-open [c (jdbc/get-connection data-store
+                                     {:auto-commit false
+                                      :reWriteBatchedInserts true})]
+    (swap! db-conn (constantly c))
+    (load-regexps)
+    (cond
+      (:aws-s3 @cli-opts) (process-s3)
+      (:aws-rds @cli-opts) (process-rds)
+      (:file @cli-opts) (process-local-file (:file @cli-opts))
+      (:dbname @cli-opts) (let [datasource {:dbtype "postgresql"
+                                            :host (:host @cli-opts)
+                                            :port (:port @cli-opts)
+                                            :user (:user @cli-opts)
+                                            :password (:password @cli-opts)
+                                            :dbname (:dbname @cli-opts)}]
+                            (if (some nil? (vals datasource))
+                              (usage parsed)
+                              (process-psql "Omprem" datasource)))
+      :else (usage parsed)))
+  (let [total-matches (reduce + (vals @match-count))]
+    (when (pos? total-matches)
+      (println "Matches registered:" total-matches))))
+
 (defn -main [& args]
   (let [parsed (cli/parse-opts args
                                [["-v" "--verbose" "Verbosity"
@@ -272,7 +318,7 @@
                                 ["-f" "--file FILE" "Proces local text file"
                                  :validate [#(.exists (io/file %)) "No such file"]]
                                 ["-d" "--dbname DATABASE" "PostgreSQL database name"]
-                                ["-h" "--host HOSTNAME" "PostgreSQL server host"]
+                                ["-H" "--host HOSTNAME" "PostgreSQL server host"]
                                 ["-p" "--port PORT" "PostgreSQL server port"
                                  :default 5432
                                  :parse-fn #(Integer/parseInt %)
@@ -281,34 +327,16 @@
                                 ["-w" "--password PASS" "PostgreSQL server password"]
                                 ["-m" "--maxmatches N" "Process up to N matches per source"
                                  :parse-fn #(Integer/parseInt %)
-                                 :validate [#(<= % 0) "Invalid number of matches"]
-                                 ]]
-                               )
+                                 :validate [#(> % 0) "Invalid number of matches"]
+                                 ]
+                                ["-h" "--help" "Show this help"]])
         err (:errors parsed)]
-    (swap! cli-opts (constantly (:options parsed)))
     (when err
       (println (first err))
       (System/exit 0))
-    (with-open [c (jdbc/get-connection data-store
-                                       {:auto-commit false
-                                        :reWriteBatchedInserts true})]
-      (swap! db-conn (constantly c))
-      (load-regexps)
-      (cond
-        (:aws-s3 @cli-opts) (process-s3)
-        (:aws-rds @cli-opts) (process-rds)
-        (:file @cli-opts) (process-local-file (:file @cli-opts))
-        (:dbname @cli-opts) (let [datasource {:dbtype "postgresql"
-                                              :host (:host @cli-opts)
-                                              :port (:port @cli-opts)
-                                              :user (:user @cli-opts)
-                                              :password (:password @cli-opts)
-                                              :dbname (:dbname @cli-opts)}]
-                              (if (some nil? (vals datasource))
-                                (usage parsed)
-                                (process-psql "Omprem" datasource)))
-        :else (usage parsed))))
-  (let [total-matches (reduce + (vals @match-count))]
-    (when (pos? total-matches)
-      (println "Matches registered:" total-matches)))
+    (swap! cli-opts (constantly (:options parsed)))
+    (if (:help @cli-opts)
+      (usage parsed)
+      (do-work parsed)))
   (System/exit 0))                      ; or else
+
