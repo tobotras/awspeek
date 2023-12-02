@@ -55,13 +55,14 @@
                             0)))]
     (assoc re-spec :pattern (re-pattern (str/escape re {\\ "\\"})))))
   
+(def jdbc-execute! [conn request]
+  (jdbc/execute! conn (sql/format request) {:builder-fn rs/as-unqualified-lower-maps}))
 
 (defn load-regexps []
   ;; SELECT REGEXPS.LABEL, REGEXPS.REGEX, DATA_CLASSES.NAME FROM REGEXPS INNER JOIN DATA_CLASSES ON REGEXPS.CLASS = DATA_CLASS.ID;
-  (let [request {:select [:regexps.id :regexps.label :regexps.regex [:data_classes.name :class]]
-                 :from [:regexps]
-                 :right-join [:data_classes [:= :regexps.class :data_classes.id]]}
-        rs (jdbc/execute! @db-conn (sql/format request) {:builder-fn rs/as-unqualified-lower-maps})]
+  (let [rs (jdbc-execute! @db-conn {:select [:regexps.id :regexps.label :regexps.regex [:data_classes.name :class]]
+                                    :from [:regexps]
+                                    :right-join [:data_classes [:= :regexps.class :data_classes.id]]})]
     (alter-var-root (var regexps) (fn [_] (mapv precompile-regex rs)))))
 
 ;; Assumption: UNIX env
@@ -189,7 +190,7 @@
         dirName (-> file
                     .getAbsoluteFile
                     .getParent)]
-    (-> file-name
+    (-> file
         io/input-stream
         (grep-stream "Filesystem" "Local file" (hostname) dirName (.getName file)))))
 
@@ -207,13 +208,14 @@
     (if (empty? text-cols)
       (println table-name "has no text columns")
       (let [cols-list (mapv #(keyword (:name %)) text-cols)
-            rs (jdbc/execute! conn (sql/format {:select cols-list
-                                                :from (keyword table-name)
-                                                :limit 1}) {:builder-fn rs/as-unqualified-lower-maps})]
+            rs (jdbc-execute! conn {:select cols-list
+                                    :from (keyword table-name)
+                                    :limit 1})]
         (doseq [row rs]
           (process-row asset resource location folder table-name row))))))
 
-(defn process-psql-table [asset resource location folder conn ^org.postgresql.jdbc.PgDatabaseMetaData metadata table-name]
+(defn process-psql-table [asset resource location folder conn
+                          ^org.postgresql.jdbc.PgDatabaseMetaData metadata table-name]
   (println "* * Processing table" table-name)
   (let [rs (.getColumns metadata nil nil table-name nil)]
     (loop [cols []]
@@ -243,10 +245,13 @@
 
 (defn discover-db [datasource]
   (with-open [conn (jdbc/get-connection datasource)]
-    (let [rs (jdbc/execute! conn
-                            ["SELECT datname FROM pg_database WHERE datistemplate = false AND datname <> 'postgres' AND datname <> 'rdsadmin'"]
-                            {:builder-fn rs/as-unqualified-lower-maps})]
-      (map #(:datname %) rs))))
+    (map :datname
+         (jdbc-execute! conn {:select :datname
+                              :from [:pg_database]
+                              :where [:and
+                                      [:= :datistemplate false]
+                                      [:not= :datname "postgres"]
+                                      [:not= :datname "rdsadmin"]]}))))
 
 (defn process-rds-postgres [instance]
   (let [status (:dbinstance-status instance)]
